@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Tempo</string>
+	<key>CFBundleExecutable</key>
+	<string>Tempo</string>
+	<key>CFBundleIconFile</key>
+	<string>Tempo</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.tempo.listening</string>
+	<key>CFBundleName</key>
+	<string>Tempo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.tempo.listening</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tempo</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Tempo controls playback in Spotify and Apple Music from its menu-bar mini player.</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>Tempo reads your Music library to total up how long you've listened to each artist, app, and song.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+</dict>
+</plist>

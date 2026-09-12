@@ -1,0 +1,9 @@
+# Build products — Tempo.app is produced by build.sh
+build/
+*.app/
+
+.signing/
+*.p12
+*.pem
+
+.DS_Store
