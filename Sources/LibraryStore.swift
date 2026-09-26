@@ -64,7 +64,11 @@ final class LibraryStore: ObservableObject {
     /// and `forEachTrack` to walk them without building the joined array.
     var tracks: [Track] { libraryTracks + importedTracks }
 
-    var trackCount: Int { libraryTracks.count + importedTracks.count }
+    /// A `dayOnly` residual play is a Music library aggregate split into several
+    /// synthetic per-day plays (see `spreadResidual`), not a distinct track — so
+    /// it's excluded here the same way it's excluded from the library scan's own
+    /// item count (`status`), or a library of 1,205 songs would claim thousands.
+    var trackCount: Int { libraryTracks.lazy.filter { !$0.dayOnly }.count + importedTracks.count }
 
     /// Every cached aggregate keys off `dataVersion`, so a setting that changes
     /// what the numbers mean — rather than what the data is — has to bump it too.
@@ -87,9 +91,11 @@ final class LibraryStore: ObservableObject {
     var datedPlayCount: Int { importedTracks.reduce(0) { $0 + $1.plays } }
     var hasTracks: Bool { !libraryTracks.isEmpty || !importedTracks.isEmpty }
 
-    /// Played tracks with no per-play timestamp — the count the "hidden in this
-    /// range" note reports. Cached because that note is drawn on every pass and
-    /// used to filter the whole library each time.
+    /// Played tracks with genuinely no play date at all — Music never dated them
+    /// (see `spreadResidual`), so there's nothing to place them by even to the
+    /// day. The count the "hidden in this range" note reports. Cached because
+    /// that note is drawn on every pass and used to filter the whole library
+    /// each time.
     private var approxCountCache: (version: UInt64, count: Int)? = nil
     var approximateTrackCount: Int {
         if let c = approxCountCache, c.version == dataVersion { return c.count }
@@ -140,6 +146,12 @@ final class LibraryStore: ObservableObject {
         for t in recentPlays {
             if let d = t.lastPlayed { set.insert(cal.component(.year, from: d)) }
         }
+        // recentPlays is importedTracks only — a dayOnly Apple Music estimate
+        // lives in libraryTracks, so a year covered by nothing else would
+        // otherwise never appear as a tab to select it under.
+        for t in libraryTracks where t.dayOnly {
+            if let d = t.lastPlayed { set.insert(cal.component(.year, from: d)) }
+        }
         let years = set.sorted(by: >)
         playYearsCache = (dataVersion, years)
         return years
@@ -188,7 +200,8 @@ final class LibraryStore: ObservableObject {
             libraryTracks = cachedLibrary
             artworkData = Persistence.loadArtwork()
             artwork = artworkData.compactMapValues { NSImage(data: $0) }
-            status = .loaded(count: cachedLibrary.count)
+            // Same exclusion as the scan itself — a dayOnly play isn't a song.
+            status = .loaded(count: cachedLibrary.lazy.filter { !$0.dayOnly }.count)
         }
         load()                                     // refresh from the Music library
         syncNow()                                  // refresh connected live sources once
@@ -1006,6 +1019,68 @@ final class LibraryStore: ObservableObject {
         return out
     }
 
+    /// Turns a library track's leftover, still-undated play count into
+    /// individual `dayOnly` plays, so it counts in a week or a month instead of
+    /// only under "All time" — the same idea as `inferPlays`, at day rather than
+    /// scrobble precision, and for the count-rises we could never anchor to a
+    /// specific scan (this song's very first sighting, or a rise that predates
+    /// the oldest snapshot Tempo has on disk).
+    ///
+    /// `t.lastPlayed` is Music's one lifetime "last played" stamp for the song;
+    /// `t.plays` is how many of its plays neither a live scrobble nor a
+    /// count-rise could place. Both bounds below come from real, recorded dates
+    /// — nothing here is invented, only placed less precisely than a scrobble:
+    ///  * `firstKnown`, when present, is the earliest play Tempo already holds
+    ///    for this song — every residual play predates it, by definition.
+    ///  * `added` is the song's library "date added". Bulk imports mean this
+    ///    isn't "the day you first heard it", but it IS the earliest day it
+    ///    could have been played *in this library*, and Music never lets a
+    ///    lastPlayedDate sit before it.
+    /// Spread evenly across that window and snapped to local noon so the exact
+    /// hour never reads as a real scrobble, and deterministic — the same
+    /// residual lands on the same days on every rescan, rather than drifting
+    /// with whenever Tempo happened to notice it.
+    nonisolated static func spreadResidual(_ t: Track, added: Date?, firstKnown: Date?, now: Date) -> [Track] {
+        // A lastPlayedDate after "now" is a clock/sync glitch, not a play we can
+        // honestly place — same guard `inferPlays` applies. Leave it undated.
+        guard let last = t.lastPlayed, t.plays > 0, last <= now else { return [t] }
+        let cal = Calendar.current
+        func noon(_ d: Date) -> Date { cal.date(bySettingHour: 12, minute: 0, second: 0, of: d) ?? d }
+
+        // With no play of this song known at all, the lastPlayed stamp itself
+        // is one of these plays — pin it there, exactly as `inferPlays` does,
+        // and only the rest need spreading.
+        let pinLast = firstKnown == nil
+        let hi = min(last, firstKnown ?? last)
+        var lo = added ?? hi
+        if lo > hi { lo = hi }
+
+        var out: [Track] = []
+        func play(_ at: Date) -> Track {
+            Track(title: t.title, artist: t.artist, album: t.album, albumKey: t.albumKey,
+                  source: t.source, lengthMs: t.lengthMs, plays: 1, lastPlayed: at,
+                  isExact: true, year: t.year, inferred: true, dayOnly: true)
+        }
+        var toSpread = t.plays
+        if pinLast {
+            out.append(play(last))
+            toSpread -= 1
+        }
+        if toSpread > 0 {
+            let span = hi.timeIntervalSince(lo)
+            for i in 0..<toSpread {
+                let frac = (Double(i) + 0.5) / Double(toSpread)
+                let at = min(max(noon(lo.addingTimeInterval(span * frac)), lo), hi)
+                out.append(play(at))
+            }
+        }
+        // The aggregate itself is spent — everything it represented now exists
+        // as the individual plays above — but it stays around at zero so
+        // duration lookups and the "hidden in this range" count still see it.
+        out.append(t.withPlays(0))
+        return out
+    }
+
     /// Normalised identity for a title and artist: same song, however the source
     /// spelled it. Sources credit differently — Last.fm files a track under
     /// "Pritam" where Apple Music lists "Pritam, Arijit Singh, Antara Mitra" —
@@ -1122,8 +1197,8 @@ final class LibraryStore: ObservableObject {
         if libraryTracks.isEmpty { status = .loading }
         // Snapshot how many plays we've already witnessed live (exact timestamp,
         // recorded by the Scrobbler) for each track, so the library's own lifetime
-        // playCount can be reduced to just the plays we DIDN'T witness — the ones
-        // with no exact date, which stay approximate (see Track.isExact).
+        // playCount can be reduced to just the plays we DIDN'T witness — the
+        // residual `spreadResidual` places across the track's library history.
         var scrobbledCounts: [String: Int] = [:]
         for t in importedTracks where Self.fromMusicApp(t) {
             scrobbledCounts[Self.dedupKey(t), default: 0] += 1
@@ -1141,6 +1216,17 @@ final class LibraryStore: ObservableObject {
             }
         }
         let alreadyLive = liveSince
+        // Earliest play we already hold for each song, from a live scrobble or
+        // an earlier count-rise inference — Music-app plays only. A track's
+        // residual count (below) is everything left over once those are
+        // subtracted, so it all predates this date: it becomes the upper bound
+        // of the window `spreadResidual` places those plays across.
+        var firstKnown: [String: Date] = [:]
+        for t in importedTracks where Self.fromMusicApp(t) {
+            guard let d = t.lastPlayed else { continue }
+            let k = Self.dedupKey(t)
+            firstKnown[k] = min(firstKnown[k] ?? d, d)
+        }
         // Reuse the cached cover thumbnails — decoding artwork out of the Music
         // library dominates a scan (seconds), while reading back a downscaled
         // PNG is trivial. Only genuinely new albums get decoded.
@@ -1150,6 +1236,11 @@ final class LibraryStore: ObservableObject {
                 let lib = try ITLibrary(apiVersion: "1.0")
                 var out: [Track] = []
                 out.reserveCapacity(lib.allMediaItems.count)
+                // Parallel to `out` — when a residual (the item's `Track` at the
+                // same index in `out`) needs spreading, this is the earliest
+                // moment it could have been played.
+                var addedDates: [Date?] = []
+                addedDates.reserveCapacity(lib.allMediaItems.count)
                 var coverData: [String: Data] = [:]
                 // Lifetime counts summed per song identity — two library items
                 // can be the same song — plus enough of the tagging to build a
@@ -1199,6 +1290,7 @@ final class LibraryStore: ObservableObject {
                         isExact: false,
                         year: item.year > 0 ? Int(item.year) : nil
                     ))
+                    addedDates.append(item.addedDate)
 
                     // Load each album's cover once, downscaled, off the main thread.
                     if Int(item.playCount) > 0, coverData[albumKey] == nil {
@@ -1219,23 +1311,47 @@ final class LibraryStore: ObservableObject {
                 // out of the library's undated residual or they'd be counted twice.
                 var owed: [String: Int] = [:]
                 for t in inferred { owed[Self.songMatchKey(title: t.title, artist: t.artist), default: 0] += 1 }
-                let loaded = out.map { t -> Track in
+                // Extend the upper bound `spreadResidual` places plays under with
+                // whatever this very scan just inferred — a song can get both a
+                // freshly-dated count-rise play AND an older, still-unplaced
+                // residual in the same pass, and the residual has to land before it.
+                var firstKnownNow = firstKnown
+                for t in inferred {
+                    guard let d = t.lastPlayed else { continue }
                     let k = Self.songMatchKey(title: t.title, artist: t.artist)
-                    guard let n = owed[k], n > 0, t.plays > 0 else { return t }
-                    let take = min(n, t.plays)
-                    owed[k] = n - take
-                    return t.withPlays(t.plays - take)
+                    firstKnownNow[k] = min(firstKnownNow[k] ?? d, d)
+                }
+                var loaded: [Track] = []
+                loaded.reserveCapacity(out.count)
+                for (idx, item) in out.enumerated() {
+                    let k = Self.songMatchKey(title: item.title, artist: item.artist)
+                    var t = item
+                    if let n = owed[k], n > 0, t.plays > 0 {
+                        let take = min(n, t.plays)
+                        owed[k] = n - take
+                        t = t.withPlays(t.plays - take)
+                    }
+                    guard t.plays > 0, t.lastPlayed != nil else { loaded.append(t); continue }
+                    loaded.append(contentsOf: Self.spreadResidual(t, added: addedDates[idx],
+                                                                   firstKnown: firstKnownNow[k], now: now))
                 }
                 let art = coverData
                 let images = art.compactMapValues { NSImage(data: $0) }
+                // Immutable handles for the actor hop — `out` and `loaded` above
+                // are `var`s during construction, which Swift's strict
+                // concurrency checking won't treat as safe to capture as-is.
+                let itemCount = out.count
+                let finalLoaded = loaded
                 await MainActor.run {
-                    self.libraryTracks = loaded
+                    self.libraryTracks = finalLoaded
                     Persistence.savePlayCounts(.init(taken: now, counts: snapshot))
                     if !inferred.isEmpty { self.mergeImported(inferred, source: .appleMusic, replace: false) }
                     self.artworkData = art
                     // Keep any remote covers already resolved for imported tracks.
                     self.artwork.merge(images) { _, new in new }
-                    self.status = .loaded(count: loaded.count)
+                    // The item count, not `finalLoaded.count` — a residual spread
+                    // into several dayOnly plays is still one song (see `trackCount`).
+                    self.status = .loaded(count: itemCount)
                     self.scanning = false
                     // The library is where most real durations come from, so this
                     // is the moment scrobbles that settled for the estimate can be
@@ -1244,7 +1360,7 @@ final class LibraryStore: ObservableObject {
                     self.backfillScrobbleDurations()
                     self.resolveScrobbleDurations()
                 }
-                Persistence.saveLibrary(loaded)
+                Persistence.saveLibrary(finalLoaded)
                 Persistence.saveArtwork(art)
             } catch {
                 let ns = error as NSError

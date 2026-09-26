@@ -4,9 +4,10 @@ import UniformTypeIdentifiers
 
 // MARK: - Scope
 
-/// Which slice of history a Wrapped is about. Year scopes only include plays we
-/// have exact timestamps for, so an Apple Music library scan (one lifetime
-/// "last played" date per track) shows up under All time only — see Track.isExact.
+/// Which slice of history a Wrapped is about. A year scope includes anything
+/// dated inside it, exact timestamp or not — an Apple Music library track's
+/// leftover plays are spread across an estimated day each (see
+/// LibraryStore.spreadResidual) rather than only ever falling under All time.
 enum WrappedScope: Hashable, Identifiable {
     case allTime
     case year(Int)

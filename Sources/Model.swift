@@ -54,6 +54,14 @@ struct Track: Identifiable, Codable {
     /// it can be dated well enough to count in a week or a month — but not to
     /// the minute, and it's flagged so nothing presents it as a real scrobble.
     var inferred: Bool = false
+    /// A date guessed to the *day*, not a timestamp. Set for Apple Music plays
+    /// that Music's own lifetime play count proves happened, but that neither a
+    /// live scrobble nor a count-rise could place: spread evenly across the
+    /// window between the track's library "date added" and its last-played date
+    /// (see LibraryStore.spreadResidual). Always implies `inferred`. Kept
+    /// distinct from `inferred` so the UI can call these out as day-level
+    /// guesses rather than the closer-to-exact count-rise placements.
+    var dayOnly: Bool = false
 
     var totalMs: Int { lengthMs * plays }
 
@@ -69,9 +77,11 @@ struct Track: Identifiable, Codable {
     /// only records it can catch are the ones that shouldn't have counted.
     /// Only ever applied to a single dated play. A library record is an
     /// aggregate — a real track length and a lifetime count — so a genuinely
-    /// short song there is a short song, not an abandoned stream.
+    /// short song there is a short song, not an abandoned stream. A `dayOnly`
+    /// play is also a library record split into individual plays rather than a
+    /// single dated stream, so it's exempted the same way.
     var countsAsPlay: Bool {
-        guard PlayCounting.enabled, isExact, lengthMs > 0 else { return true }
+        guard PlayCounting.enabled, isExact, !dayOnly, lengthMs > 0 else { return true }
         return lengthMs >= PlayCounting.minMs
     }
 
@@ -81,7 +91,7 @@ struct Track: Identifiable, Codable {
     func withPlays(_ n: Int) -> Track {
         Track(id: id, title: title, artist: artist, album: album, albumKey: albumKey,
               source: source, lengthMs: lengthMs, plays: n, lastPlayed: lastPlayed,
-              artURL: artURL, isExact: isExact, year: year, inferred: inferred)
+              artURL: artURL, isExact: isExact, year: year, inferred: inferred, dayOnly: dayOnly)
     }
 
     /// The same play with a length filled in. Last.fm scrobbles arrive without
@@ -90,16 +100,16 @@ struct Track: Identifiable, Codable {
     func withLength(_ ms: Int) -> Track {
         Track(id: id, title: title, artist: artist, album: album, albumKey: albumKey,
               source: source, lengthMs: ms, plays: plays, lastPlayed: lastPlayed,
-              artURL: artURL, isExact: isExact, year: year, inferred: inferred)
+              artURL: artURL, isExact: isExact, year: year, inferred: inferred, dayOnly: dayOnly)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, artist, album, albumKey, source, lengthMs, plays, lastPlayed, artURL, isExact, year, inferred
+        case id, title, artist, album, albumKey, source, lengthMs, plays, lastPlayed, artURL, isExact, year, inferred, dayOnly
     }
 
     init(id: UUID = UUID(), title: String, artist: String, album: String, albumKey: String,
          source: Source, lengthMs: Int, plays: Int, lastPlayed: Date?, artURL: String? = nil,
-         isExact: Bool = true, year: Int? = nil, inferred: Bool = false) {
+         isExact: Bool = true, year: Int? = nil, inferred: Bool = false, dayOnly: Bool = false) {
         self.id = id
         self.title = title
         self.artist = artist
@@ -113,6 +123,7 @@ struct Track: Identifiable, Codable {
         self.isExact = isExact
         self.year = year
         self.inferred = inferred
+        self.dayOnly = dayOnly
     }
 
     // Custom decode so history.json saved before `isExact` existed still loads
@@ -132,6 +143,7 @@ struct Track: Identifiable, Codable {
         isExact = try c.decodeIfPresent(Bool.self, forKey: .isExact) ?? true
         year = try c.decodeIfPresent(Int.self, forKey: .year)
         inferred = try c.decodeIfPresent(Bool.self, forKey: .inferred) ?? false
+        dayOnly = try c.decodeIfPresent(Bool.self, forKey: .dayOnly) ?? false
     }
 }
 
@@ -140,6 +152,8 @@ struct Track: Identifiable, Codable {
 /// track if it was last played inside the window.
 enum TimeRange: Hashable {
     case last7, last30, last3mo, last6mo, allTime
+    /// A whole calendar year, picked from the years you actually have plays in.
+    case year(Int)
     case custom(Date, Date)
 
     static let presets: [TimeRange] = [.last7, .last30, .last3mo, .last6mo, .allTime]
@@ -151,11 +165,16 @@ enum TimeRange: Hashable {
         case .last3mo: return "3 months"
         case .last6mo: return "6 months"
         case .allTime: return "All time"
+        case .year(let y): return "\(y)"
         case .custom:  return "Custom"
         }
     }
 
     var isCustom: Bool { if case .custom = self { return true }; return false }
+    var isYear: Bool { if case .year = self { return true }; return false }
+    /// The year this range covers, or nil if it isn't a year range — so the
+    /// picker can show which entry is ticked.
+    var selectedYear: Int? { if case .year(let y) = self { return y }; return nil }
     var isAllTime: Bool { if case .allTime = self { return true }; return false }
 
     func contains(_ date: Date?) -> Bool {
@@ -169,6 +188,7 @@ enum TimeRange: Hashable {
         case .last3mo: return date >= cal.date(byAdding: .month, value: -3, to: now)!
         case .last6mo: return date >= cal.date(byAdding: .month, value: -6, to: now)!
         case .allTime: return true
+        case .year(let y): return cal.component(.year, from: date) == y
         case .custom(let a, let b):
             let lo = cal.startOfDay(for: min(a, b))
             let hi = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: max(a, b)))!

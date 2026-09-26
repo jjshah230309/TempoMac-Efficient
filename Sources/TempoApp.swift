@@ -312,6 +312,7 @@ struct CenterPanel: View {
     @Binding var showHistory: Bool
     @Binding var showWrapped: Bool
     @State private var showCustom = false
+    @State private var showYear = false
     @State private var arrowMonitor: Any? = nil
     @State private var arrowRows: [String] = []
     @State private var historyLimit = 300
@@ -609,14 +610,58 @@ struct CenterPanel: View {
             ForEach(TimeRange.presets, id: \.self) { p in
                 chip(p.label, active: range == p) { range = p }
             }
+            yearChip
             chip(customLabel, active: range.isCustom) {
                 range = .custom(customFrom, customTo); showCustom = true
             }
             .popover(isPresented: $showCustom, arrowEdge: .bottom) { customPicker }
             Spacer()
             Image(systemName: "info.circle").foregroundColor(C.muted2).font(.system(size: 12 * ThemeManager.shared.zoom))
-                .help("Ranges use each track's last-played date. Apple's library doesn't store individual play timestamps, so a track played in this period contributes its full play count.")
+                .help("Ranges use each play's date. Live scrobbles and count-rises are dated to the moment; Apple's library doesn't store individual play timestamps, so a track's remaining plays are spread evenly across its time in your library, dated to the day rather than witnessed.")
         }
+    }
+
+    /// A whole calendar year. Presented as an ordinary tab that opens a small
+    /// list, exactly like Custom next to it — a `Menu` here drew its own
+    /// disclosure arrow ahead of the label and sat off the row's baseline, so
+    /// it never matched the tabs it lives among. Only years with plays are
+    /// offered, so the tab can never select an empty range.
+    @ViewBuilder private var yearChip: some View {
+        if !store.playYears.isEmpty {
+            chip(range.selectedYear.map { "\($0)" } ?? "Year", active: range.isYear) {
+                showYear = true
+            }
+            .popover(isPresented: $showYear, arrowEdge: .bottom) { yearPicker }
+        }
+    }
+
+    private var yearPicker: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(store.playYears, id: \.self) { y in
+                let on = range.selectedYear == y
+                Button {
+                    range = .year(y)
+                    showYear = false
+                } label: {
+                    HStack(spacing: 14) {
+                        Text(verbatim: "\(y)")
+                            .font(Type.mono(12, on ? .semibold : .regular))
+                            .foregroundColor(on ? C.text : C.muted)
+                        Spacer(minLength: 0)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9 * ThemeManager.shared.zoom, weight: .semibold))
+                            .foregroundColor(C.green)
+                            .opacity(on ? 1 : 0)        // reserved, so rows don't shift
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .frame(width: 104, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
     }
 
     private var customLabel: String {
@@ -749,7 +794,7 @@ struct CenterPanel: View {
                     .buttonStyle(.plain)
                     .font(Type.mono(11, .semibold)).foregroundColor(C.green)
             } else if !range.isAllTime {
-                Text("Nothing in this period. Apple Music library tracks only carry one lifetime date, so they only appear under All time.")
+                Text("Nothing in this period. A few Apple Music library tracks carry no play date at all, so they only ever appear under All time.")
                     .font(Type.mono(11)).foregroundColor(C.muted2)
                     .multilineTextAlignment(.center).frame(maxWidth: 380)
                 Button("Show all time") { range = .allTime }
@@ -763,18 +808,38 @@ struct CenterPanel: View {
         }.frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 
-    /// Explain the one genuinely confusing behaviour in the app: the Music
-    /// library only stores a single lifetime "last played" date per track, so
-    /// those tracks can't honestly be placed in a narrower window.
+    /// Apple Music plays this range includes only as a day-level guess — spread
+    /// across each track's time in the library rather than witnessed (see
+    /// LibraryStore.spreadResidual). Counted straight from what's on screen, so
+    /// it always matches whatever range/source/search is active.
+    private var estimatedPlayCount: Int {
+        store.visible(range: range, source: sourceFilter, search: search)
+            .reduce(0) { $0 + ($1.dayOnly ? $1.countedPlays : 0) }
+    }
+
+    /// Explain the one genuinely confusing behaviour left in the app: a
+    /// handful of library tracks Music never dated at all, which still can't
+    /// be honestly placed in anything narrower than All time.
     @ViewBuilder private var approximateNote: some View {
-        if !range.isAllTime {
-            let hidden = store.approximateTrackCount
-            if hidden > 0 {
-                HStack(spacing: 7) {
-                    Image(systemName: "info.circle").font(.system(size: 10)).foregroundColor(C.muted2)
-                    Text("\(TimeFmt.commas(hidden)) library tracks are hidden in this range — Apple Music only records one lifetime date each, so they only count under All time.")
-                        .font(Type.mono(9)).foregroundColor(C.muted2)
-                    Spacer()
+        let estimated = estimatedPlayCount
+        let hidden = !range.isAllTime ? store.approximateTrackCount : 0
+        if estimated > 0 || hidden > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                if estimated > 0 {
+                    HStack(spacing: 7) {
+                        Image(systemName: "info.circle").font(.system(size: 10)).foregroundColor(C.muted2)
+                        Text("Includes \(TimeFmt.commas(estimated)) estimated Apple Music play\(estimated == 1 ? "" : "s") — dated to the day across each track's time in your library, not witnessed directly.")
+                            .font(Type.mono(9)).foregroundColor(C.muted2)
+                        Spacer()
+                    }
+                }
+                if hidden > 0 {
+                    HStack(spacing: 7) {
+                        Image(systemName: "info.circle").font(.system(size: 10)).foregroundColor(C.muted2)
+                        Text("\(TimeFmt.commas(hidden)) library tracks are hidden in this range — Music never recorded a play date for them at all, so they only count under All time.")
+                            .font(Type.mono(9)).foregroundColor(C.muted2)
+                        Spacer()
+                    }
                 }
             }
         }
@@ -1052,11 +1117,14 @@ struct DetailPanel: View {
     }
 
     /// Your history with this artist/song: a 12-month sparkline plus the dates
-    /// that give it context. Only timestamped plays can be placed in time, so an
-    /// Apple Music library-only entry shows nothing here.
+    /// that give it context. Only dated plays can be placed in time — a library
+    /// track with no play date at all (see Track.isExact) shows nothing here;
+    /// one whose plays are day-level estimates (Track.dayOnly) does, marked as
+    /// such wherever its estimate is the date being shown.
     private struct TimelineInfo {
         let series: [Int]      // plays per month, oldest → newest (12 buckets)
         let first: Date
+        let firstEstimated: Bool   // `first` came from a day-level guess, not a witnessed date
         let last: Date
         let days: Int
     }
@@ -1065,8 +1133,9 @@ struct DetailPanel: View {
     private func timelineInfo(_ items: [Track]) -> TimelineInfo? {
         let cal = Calendar.current
         let dated = items.filter { $0.isExact && $0.lastPlayed != nil }
-        guard let first = dated.compactMap({ $0.lastPlayed }).min(),
+        guard let firstItem = dated.min(by: { $0.lastPlayed! < $1.lastPlayed! }),
               let last = dated.compactMap({ $0.lastPlayed }).max() else { return nil }
+        let first = firstItem.lastPlayed!
         let months: [Date] = (0..<12).reversed().compactMap {
             cal.date(byAdding: .month, value: -$0, to: Date()).flatMap {
                 cal.date(from: cal.dateComponents([.year, .month], from: $0))
@@ -1079,7 +1148,8 @@ struct DetailPanel: View {
             counts[m, default: 0] += t.countedPlays
         }
         let days = Set(dated.compactMap { $0.lastPlayed.map { LibraryStore.listeningDay($0) } }).count
-        return TimelineInfo(series: months.map { counts[$0] ?? 0 }, first: first, last: last, days: days)
+        return TimelineInfo(series: months.map { counts[$0] ?? 0 }, first: first,
+                             firstEstimated: firstItem.dayOnly, last: last, days: days)
     }
 
     @ViewBuilder private func timeline(_ items: [Track]) -> some View {
@@ -1098,8 +1168,9 @@ struct DetailPanel: View {
                             .frame(maxWidth: .infinity)
                     }
                 }.frame(height: 34, alignment: .bottom)
-                Text("first heard \(first.formatted(date: .abbreviated, time: .omitted))")
+                Text("first heard \(info.firstEstimated ? "~" : "")\(first.formatted(date: .abbreviated, time: .omitted))")
                     .font(Type.mono(10)).foregroundColor(C.muted)
+                    .help(info.firstEstimated ? "Estimated — Apple Music doesn't record individual play dates, so this is a guess spread across the track's time in your library." : "")
                 Text("last played \(last.formatted(date: .abbreviated, time: .omitted)) · across \(TimeFmt.commas(days)) day\(days == 1 ? "" : "s")")
                     .font(Type.mono(10)).foregroundColor(C.muted2)
             }
