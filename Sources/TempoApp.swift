@@ -147,15 +147,65 @@ struct ContentView: View {
     @State private var search = ""
     @State private var selected: String? = nil
     @AppStorage("view.split") private var splitCollabs = false
-    @State private var range: TimeRange = .allTime
-    @State private var customFrom = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
-    @State private var customTo = Date()
+    // TimeRange carries associated values, so it can't go through a single
+    // RawRepresentable @AppStorage the way GroupBy/SortBy do above — it's
+    // spread across a kind string plus the extra values each kind needs, and
+    // reassembled the same way (get/set through a computed Binding) so a
+    // picked year or custom range survives quitting instead of always
+    // reopening on "All time".
+    @AppStorage("view.range.kind") private var rangeKind = "allTime"
+    @AppStorage("view.range.year") private var rangeYear = 0
+    @AppStorage("view.range.customFrom") private var rangeCustomFromStamp: Double = 0
+    @AppStorage("view.range.customTo") private var rangeCustomToStamp: Double = 0
 
     private var groupBy: Binding<GroupBy> {
         Binding(get: { GroupBy(rawValue: groupByRaw) ?? .artist }, set: { groupByRaw = $0.rawValue })
     }
     private var sortBy: Binding<SortBy> {
         Binding(get: { SortBy(rawValue: sortByRaw) ?? .time }, set: { sortByRaw = $0.rawValue })
+    }
+    private var range: Binding<TimeRange> {
+        Binding(get: {
+            switch rangeKind {
+            case "last7":   return .last7
+            case "last30":  return .last30
+            case "last3mo": return .last3mo
+            case "last6mo": return .last6mo
+            case "year":    return .year(rangeYear)
+            case "custom":  return .custom(customFrom.wrappedValue, customTo.wrappedValue)
+            default:        return .allTime
+            }
+        }, set: { newValue in
+            switch newValue {
+            case .last7:   rangeKind = "last7"
+            case .last30:  rangeKind = "last30"
+            case .last3mo: rangeKind = "last3mo"
+            case .last6mo: rangeKind = "last6mo"
+            case .allTime: rangeKind = "allTime"
+            case .year(let y):
+                rangeKind = "year"; rangeYear = y
+            case .custom(let from, let to):
+                rangeKind = "custom"
+                rangeCustomFromStamp = from.timeIntervalSinceReferenceDate
+                rangeCustomToStamp = to.timeIntervalSinceReferenceDate
+            }
+        })
+    }
+    /// Backing dates for a Custom range, kept separately from `range` itself
+    /// so the picker's two `DatePicker`s have somewhere to read from/write to
+    /// before "Done" is pressed — same role the old plain `@State` played,
+    /// just persisted. 0 means "never set"; falls back to the same 30-day
+    /// window the `@State` used to start at.
+    private var customFrom: Binding<Date> {
+        Binding(get: {
+            rangeCustomFromStamp > 0 ? Date(timeIntervalSinceReferenceDate: rangeCustomFromStamp)
+                : Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        }, set: { rangeCustomFromStamp = $0.timeIntervalSinceReferenceDate })
+    }
+    private var customTo: Binding<Date> {
+        Binding(get: {
+            rangeCustomToStamp > 0 ? Date(timeIntervalSinceReferenceDate: rangeCustomToStamp) : Date()
+        }, set: { rangeCustomToStamp = $0.timeIntervalSinceReferenceDate })
     }
 
     @AppStorage("view.showSidebar") private var showSidebar = true
@@ -200,13 +250,13 @@ struct ContentView: View {
             }
             CenterPanel(groupBy: groupBy, sortBy: sortBy, sourceFilter: $sourceFilter,
                         search: $search, selected: $selected, splitCollabs: $splitCollabs,
-                        range: $range, customFrom: $customFrom, customTo: $customTo,
+                        range: range, customFrom: customFrom, customTo: customTo,
                         showHistory: $showHistory, showWrapped: $showWrapped)
                 .frame(minWidth: 460, maxWidth: .infinity)
                 .layoutPriority(1)
             if showDetail {
                 DetailPanel(groupBy: groupBy.wrappedValue, sourceFilter: sourceFilter, search: search,
-                            selected: selected, splitCollabs: splitCollabs, range: range, sortBy: sortBy.wrappedValue)
+                            selected: selected, splitCollabs: splitCollabs, range: range.wrappedValue, sortBy: sortBy.wrappedValue)
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 520)
             }
         }

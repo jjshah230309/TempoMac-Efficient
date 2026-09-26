@@ -294,7 +294,27 @@ struct WrappedPanel: View {
     @EnvironmentObject var store: LibraryStore
     @ObservedObject private var theme = ThemeManager.shared
     @State private var showDeep = false
-    @State private var scope: WrappedScope = .allTime
+    // Persisted the same way as the main list's range picker (TempoApp.swift)
+    // — plain @State reset to All time on every relaunch, so a chosen year
+    // never stuck. `scope` is only ever read/assigned locally here (never
+    // handed to a child view as a Binding), so unlike that one this can stay
+    // a plain get/set computed property instead of one returning a Binding.
+    @AppStorage("wrapped.scope.kind") private var scopeKind = "allTime"
+    @AppStorage("wrapped.scope.year") private var scopeYear = 0
+    private var scope: WrappedScope {
+        get { scopeKind == "year" ? .year(scopeYear) : .allTime }
+        // Both stored properties behind this are @AppStorage, whose own
+        // setters are `nonmutating` (they write through to UserDefaults
+        // rather than to `self`) — this has to say so too, or assigning
+        // `scope = ...` from `body`/other non-mutating View computed
+        // properties won't compile.
+        nonmutating set {
+            switch newValue {
+            case .allTime: scopeKind = "allTime"
+            case .year(let y): scopeKind = "year"; scopeYear = y
+            }
+        }
+    }
     @State private var sharing = false
     @State private var shareNote: String? = nil
     /// Counts down while the jackpot animation runs; each tick re-renders the
