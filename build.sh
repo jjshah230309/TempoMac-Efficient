@@ -18,7 +18,14 @@ cp Info.plist "$APP/Contents/Info.plist"
 cp Tempo.icns "$RES/Tempo.icns"
 
 echo "▸ Compiling Swift…"
-swiftc -O \
+# -target pins the deployment target explicitly. Without it, swiftc infers one
+# from the host's Darwin kernel version — which has pointed at a macOS version
+# *newer* than the one actually installed here, producing a binary LaunchServices
+# refuses to open ("You can't use this version of the application ... with this
+# version of macOS"), even though it ran fine invoked directly (that path skips
+# LaunchServices' version check). 14.0 is also the real minimum: the SwiftUI
+# `onChange(of:initial:)` overload used in Theme.swift needs it.
+swiftc -O -target arm64-apple-macos14.0 \
     -framework iTunesLibrary -framework AuthenticationServices \
     -framework ServiceManagement -framework LocalAuthentication \
     Sources/Model.swift Sources/Theme.swift Sources/ArtistSplitter.swift Sources/Persistence.swift Sources/ArtistArt.swift Sources/HistoryImporter.swift Sources/LastFM.swift Sources/SpotifyAuth.swift Sources/Scrobbler.swift Sources/LibraryStore.swift Sources/Notify.swift Sources/Agent.swift Sources/MiniPlayer.swift Sources/Wrapped.swift Sources/Welcome.swift Sources/TempoApp.swift \
